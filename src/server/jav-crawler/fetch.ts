@@ -78,15 +78,28 @@ export async function mapLimit<T, R>(
   limit: number,
   work: (item: T, index: number) => Promise<R>,
 ) {
+  if (!Number.isSafeInteger(limit) || limit < 1)
+    throw new RangeError('Concurrency limit must be a positive safe integer');
   const result = new Array<R>(items.length);
   let next = 0;
+  let failed = false;
+  let failure: unknown;
   await Promise.all(
     Array.from({ length: Math.min(limit, items.length) }, async () => {
-      while (next < items.length) {
+      while (!failed && next < items.length) {
         const index = next++;
-        result[index] = await work(items[index], index);
+        try {
+          result[index] = await work(items[index], index);
+        } catch (error) {
+          if (!failed) {
+            failed = true;
+            failure = error;
+          }
+        }
       }
     }),
   );
+  // Drain every started worker before the caller removes staging or its lock.
+  if (failed) throw failure;
   return result;
 }

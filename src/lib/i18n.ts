@@ -27,8 +27,13 @@ export const copy = {
     loading: 'Đang chuẩn bị danh sách diễn viên…',
     refreshing:
       'Đang làm mới dữ liệu tuần này; danh sách hiện tại vẫn dùng được.',
-    cacheError:
-      'Chưa thể tải dữ liệu cục bộ. Kiểm tra kết nối/quyền ghi của server rồi thử lại.',
+    cacheError: 'Chưa tải được dữ liệu cục bộ. Đang tự động thử lại…',
+    cacheStale:
+      'Chưa tải được dữ liệu mới; đang dùng danh sách trước đó. Đang thử lại…',
+    cacheStatusUnavailable:
+      'Chưa kiểm tra được trạng thái cập nhật; danh sách hiện tại vẫn dùng được. Đang thử lại…',
+    cacheRefreshFailed:
+      'Lần làm mới gần nhất thất bại; đang dùng danh sách trước đó.',
     noEligible:
       'Không còn diễn viên phù hợp. Bật lại tier hoặc bỏ loại trừ trong Tuỳ chỉnh.',
     lastChoice: 'Lựa chọn gần nhất',
@@ -102,8 +107,11 @@ export const copy = {
     footer: 'Fan-made · SFX: Valve /',
     loading: 'Preparing the actress list…',
     refreshing: 'Refreshing this week’s data; the current list remains usable.',
-    cacheError:
-      'Local data could not load. Check the server network/write permission, then retry.',
+    cacheError: 'Local data could not load. Retrying automatically…',
+    cacheStale: 'New data could not load; using the previous list. Retrying…',
+    cacheStatusUnavailable:
+      'Update status unavailable; the current list remains usable. Retrying…',
+    cacheRefreshFailed: 'The last refresh failed; using the previous list.',
     noEligible:
       'No eligible actresses. Re-enable a tier or remove exclusions in Customize.',
     lastChoice: 'Last choice',

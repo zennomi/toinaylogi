@@ -411,8 +411,9 @@ export default function Home() {
     return (
       <main className="cache-state">
         <h1>Tối Nay Lọ Gì?</h1>
-        <p>{error ? t.cacheError : t.loading}</p>
-        <small>{status.message}</small>
+        <p role="status" title={error?.detail}>
+          {error ? t.cacheError : t.loading}
+        </p>
       </main>
     );
 
@@ -484,14 +485,18 @@ export default function Home() {
             </div>
           </div>
         </div>
-        {status.state === 'refreshing' && (
+        {!error && status?.state === 'refreshing' && (
           <p className="refresh-status" role="status">
             {t.refreshing}
           </p>
         )}
-        {status.state === 'error' && (
-          <p className="preferences-message" role="status">
-            {status.message || t.cacheError}
+        {error && (
+          <p className="preferences-message" role="status" title={error.detail}>
+            {error.kind === 'delivery'
+              ? t.cacheStale
+              : error.kind === 'status'
+                ? t.cacheStatusUnavailable
+                : t.cacheRefreshFailed}
           </p>
         )}
         {!eligible.length && (

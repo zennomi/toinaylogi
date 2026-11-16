@@ -2,7 +2,7 @@
 
 [Tiếng Việt](README.md) · **English**
 
-A local case-opening app that selects a XXX actress. Its local Next.js server crawls the first three pages of XXX.Guru's monthly-view ranking, best-effort enriches profiles from AvBase, and refreshes the pool no more than weekly.
+A local case-opening app that selects a XXX actress. Its local server crawls XXX.Guru's monthly-view ranking, best-effort enriches profiles from AvBase and Minnano-AV, and refreshes the pool weekly.
 
 <video src="assets/promo.mp4" controls="controls" muted="muted" width="100%"></video>
 
@@ -25,15 +25,21 @@ pnpm typecheck
 pnpm lint
 pnpm build
 pnpm preview
+# Build smoke test in a temporary directory, without live crawling:
+pnpm test:production
 ```
 
-The server binds to loopback only. During enrichment, it uses `impit` with a Chrome TLS fingerprint only for AvBase requests; an AvBase error, 403, or 429 never prevents a new XXX.Guru snapshot from publishing. Once a snapshot exists, the browser loads local JSON/images only; XXX.Guru, AvBase, Wikipedia, X, Instagram, and TikTok links open solely after a user click.
+Use `pnpm start` or `pnpm preview` for a production build, not bare `next start`. The `scripts/serve.mjs` entry serves the existing `/actress-cache/` URLs from the filesystem on each request and passes all other requests to Next.js. Snapshots/images created after startup therefore become available without restarting the server. Only valid manifests, status files, snapshots and images are served; this adds no API and does not expose locks or staging files. Manifests/status use no-store; snapshots/images use ETag revalidation so same-ID edits are also visible.
+
+The server defaults to loopback only. During enrichment, it uses `impit` with a Chrome TLS fingerprint only for AvBase requests; an AvBase error, 403, or 429 never prevents a new XXX.Guru snapshot from publishing. Once a snapshot exists, the browser loads local JSON/images only; XXX.Guru, AvBase, Wikipedia, X, Instagram, and TikTok links open solely after a user click.
 
 ## Local data
 
 - Snapshot v4 and crawler images are in gitignored `public/actress-cache/`; existing v3 snapshots remain readable during refresh.
 - XXX.Guru determines ranking/tier. AvBase is a best-effort supplement for Japanese name/reading, birthday, measurements, cup, blood type, hometown, hobbies, social links, Wikipedia, and DMM images copied into the local cache.
-- Staging and locks are in gitignored `.cache/jav-crawler/`.
+- Minnano-AV supplies ratings, tags, debut year and its source link. Each refresh reloads enrichment while reusing lookup caches within that run; network/blocking failures are not cached as “not found.”
+- Locks live in gitignored `.cache/jav-crawler/refresh.lock/`, with an owner token/PID/hostname. A lock is not stolen merely for running over an hour; automatic recovery requires a confirmed dead PID on this host. Legacy, malformed or uncertain owners require inspection and stopping the owner before manual cleanup. Staging and publish temporary files are placed on the output cache filesystem for atomic renames.
+- Client polling is sequential, bounded by a timeout and retried automatically. If the next snapshot cannot load, the last usable list remains visible with a warning rather than a misleading “Ready” status.
 - Tier filters, actress exclusions, language, latest choice, and the local spin count use bounded, versioned host-only cookies. The local count belongs only to this browser.
 - `SERVER-WIDE OPENS` is the number of completed case openings shared by clients of the same local Next.js server. It is stored in Redis under `toinaylogi:opens`; the connection string is server-only `REDIS_URL` in `.env` (the `.env.example` default is local `redis://localhost:6379`). It is not a hosted/community deployment metric.
 - If Redis is down, cases and the local count still work. The server counter shows unavailable and retries when the page reloads or another case completes.

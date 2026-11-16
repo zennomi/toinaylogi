@@ -1,5 +1,6 @@
-import { readFile } from 'node:fs/promises';
+import { lstat, readFile, readdir } from 'node:fs/promises';
 import { hostname } from 'node:os';
+import { join } from 'node:path';
 import { refreshActressData } from '../src/server/jav-crawler/crawler';
 import { paths } from '../src/server/jav-crawler/store';
 
@@ -13,6 +14,20 @@ const log = (message: string) =>
 
 async function readDiagnostic(path: string, label: string) {
   try {
+    const info = await lstat(path);
+    if (info.isDirectory()) {
+      const names = await readdir(path);
+      if (names.length === 1 && /^owner-[a-f0-9-]{36}\.json$/.test(names[0])) {
+        await readDiagnostic(join(path, names[0]), `${label} owner`);
+      } else {
+        log(`${label}: lock directory requires manual inspection`);
+      }
+      return;
+    }
+    if (!info.isFile() || info.size > 8192) {
+      log(`${label}: unsupported diagnostic file`);
+      return;
+    }
     log(`${label}: ${await readFile(path, 'utf8')}`);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;

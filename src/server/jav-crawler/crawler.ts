@@ -33,10 +33,12 @@ const extensionFor = (contentType: string) =>
       : 'jpg';
 
 export async function refreshActressData(force = false) {
-  const release = await takeLock();
-  if (!release) return false;
+  let release: (() => Promise<void>) | null = null;
   let staging = '';
+  let success = false;
   try {
+    release = await takeLock();
+    if (!release) return false;
     await writeStatus({
       state: 'refreshing',
       message: 'Fetching ranking pages',
@@ -109,7 +111,7 @@ export async function refreshActressData(force = false) {
       message: `Reading ${actressesToMovies.size} actress profiles`,
     });
     const avbase = createAvBaseEnricher();
-    const minnano = createMinnanoAvEnricher();
+    const minnano = createMinnanoAvEnricher({ refreshCache: true });
     const profiles = await mapLimit(
       [...actressesToMovies.entries()],
       2,
@@ -187,19 +189,27 @@ export async function refreshActressData(force = false) {
     );
     await publishSnapshot(snapshot, staging);
     staging = '';
-    return true;
+    success = true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error('[jav-crawler]', message);
     try {
       await writeStatus({ state: 'error', message: message.slice(0, 280) });
     } catch {}
-    return false;
   } finally {
     try {
       if (staging) await rm(staging, { recursive: true, force: true });
+    } catch (error) {
+      success = false;
+      console.error('[jav-crawler] Staging cleanup failed', error);
     } finally {
-      await release();
+      try {
+        await release?.();
+      } catch (error) {
+        success = false;
+        console.error('[jav-crawler] Lock release failed', error);
+      }
     }
   }
+  return success;
 }

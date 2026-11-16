@@ -185,6 +185,8 @@ export function parseMinnanoAvProfile(
 
 let sessionCookie: string | null = null;
 
+class MinnanoUnavailableError extends Error {}
+
 async function fetchPage(
   url: string,
 ): Promise<{ url: string; html: string } | null> {
@@ -210,11 +212,21 @@ async function fetchPage(
         sessionCookie = match[0];
       }
     }
-    if (!res.ok) return null;
+    // A genuine missing page is a miss; blocked/failed requests are not.
+    // Propagating outages prevents them from becoming cached negative lookups.
+    if (res.status === 404 || res.status === 410) return null;
+    if (!res.ok)
+      throw new MinnanoUnavailableError(`Minnano-AV HTTP ${res.status}`);
     const html = await res.text();
+    if (/<title>\s*(?:Just a moment|Attention Required)/i.test(html)) {
+      throw new MinnanoUnavailableError('Minnano-AV challenge page');
+    }
     return { url: res.url, html };
-  } catch {
-    return null;
+  } catch (error) {
+    if (error instanceof MinnanoUnavailableError) throw error;
+    throw new MinnanoUnavailableError(
+      error instanceof Error ? error.message : 'Minnano-AV request failed',
+    );
   }
 }
 
@@ -602,7 +614,13 @@ export function mergeMinnanoAvProfile(
   };
 }
 
-export function createMinnanoAvEnricher() {
+export function createMinnanoAvEnricher({
+  refreshCache = false,
+}: { refreshCache?: boolean } = {}) {
+  // Reset once at the start of a locked refresh, not between profile lookups.
+  // Matches, misses, and directory pages must not outlive that refresh cycle.
+  if (refreshCache) clearMinnanoAvCache();
+
   const stats: MinnanoAvEnrichmentStats = {
     provider: 'minnano-av',
     attempted: 0,
@@ -657,7 +675,13 @@ export function createMinnanoAvEnricher() {
           return { kind: 'matched', profile: found, url: found.url };
         }
       } catch (error) {
-        console.warn(`[minnano-av] Lookup error for "${term}":`, error);
+        circuitOpen = true;
+        stats.blocked++;
+        return {
+          kind: 'unavailable',
+          message:
+            error instanceof Error ? error.message : 'Minnano-AV request failed',
+        };
       }
     }
 

@@ -19,12 +19,14 @@ import {
 } from '../src/lib/actresses';
 import {
   clearMinnanoAvCache,
+  createMinnanoAvEnricher,
   extractGojuonSyllables,
   extractMinnanoIdentity,
   extractTargetKana,
   getMinnanoAvCacheStats,
   katakanaToHiragana,
   matchesIdentity,
+  mergeMinnanoAvProfile,
   normalizeName,
   parseMinnanoAvProfile,
   searchMinnanoAv,
@@ -34,6 +36,7 @@ import {
   translateTagToEnglish,
   translateTags,
 } from '../src/lib/tag-translations';
+import { assignFoodAliases, createSeededRandom } from '../src/lib/food-aliases';
 
 const html = readFileSync(
   new URL('./fixtures/xxx-guru.html', import.meta.url),
@@ -105,6 +108,178 @@ test('crawler scorer excludes profiles without a downloaded image', () => {
   );
   assert.equal(assignTiers(imageBacked, 2)[0]?.id, 'with-image');
 });
+test('refresh preserves Minnano enrichment through scoring and snapshot serialization', async (t) => {
+  const url = 'https://www.minnano-av.com/actress123.html';
+  const cases = [
+    {
+      name: 'all enrichment fields',
+      enrichment: {
+        name: 'Demo Star',
+        url,
+        ratings: {
+          looks: 8.83,
+          body: 8.8,
+          charm: 9.07,
+          eroticAppeal: 9.03,
+          overall: 9.07,
+        },
+        tags: ['美人', '48kg'],
+        debutYear: 2024,
+      },
+    },
+    {
+      name: 'partial enrichment including a zero rating',
+      enrichment: {
+        name: 'Demo Star',
+        url,
+        ratings: { overall: 0 },
+        tags: [],
+      },
+    },
+    { name: 'no matching enrichment', enrichment: undefined },
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, () => {
+      const base = parseActressProfile(
+        html,
+        'https://jav.guru/actress/demo-star/',
+      );
+      const profile = entry.enrichment
+        ? mergeMinnanoAvProfile(base, entry.enrichment, url)
+        : base;
+      const actresses = assignFoodAliases(
+        assignTiers(
+          profilesWithImages([
+            {
+              ...profile,
+              imagePath:
+                '/actress-cache/snapshots/enriched-refresh/images/demo-star.jpg',
+              movies: [
+                {
+                  rank: 1,
+                  url: 'https://jav.guru/demo-movie/',
+                  code: 'DEMO-1',
+                },
+              ],
+            },
+          ]),
+          45,
+        ),
+        createSeededRandom('enriched-refresh'),
+      );
+      const snapshot = validateSnapshot(
+        JSON.parse(
+          JSON.stringify({
+            schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+            snapshotId: 'enriched-refresh',
+            createdAt: '2026-11-16T00:00:00.000Z',
+            source: {
+              url: 'https://jav.guru/?s=&orderby=views-monthly&order=DESC&category_name=jav',
+              orderBy: 'views-monthly',
+              category: 'jav',
+              pages: 3,
+              listEntries: 45,
+              uniqueMovies: 45,
+              enrichment: {
+                provider: 'avbase',
+                attempted: 0,
+                matched: 0,
+                skipped: 0,
+                blocked: 0,
+              },
+            },
+            actresses,
+          }),
+        ),
+      );
+      assert.ok(snapshot);
+      const actress = snapshot.actresses[0];
+      assert.equal(actress.minnanoAvUrl, entry.enrichment?.url);
+      assert.deepEqual(actress.ratings, entry.enrichment?.ratings);
+      assert.deepEqual(
+        actress.tags,
+        entry.enrichment?.tags.length ? entry.enrichment.tags : undefined,
+      );
+      assert.equal(actress.debutYear, entry.enrichment?.debutYear);
+      assert.equal(actress.score, 45);
+      assert.equal(actress.bestRank, 1);
+      assert.equal(actress.appearances, 1);
+      assert.deepEqual(actress.contributingMovies, [
+        { rank: 1, code: 'DEMO-1', movieUrl: 'https://jav.guru/demo-movie/' },
+      ]);
+      assert.equal('imageUrl' in actresses[0], false);
+      assert.equal('movies' in actresses[0], false);
+    });
+  }
+});
+
+test('fresh enrichment refreshes both cached matches and misses between runs', async (t) => {
+  for (const initiallyAvailable of [true, false]) {
+    await t.test(
+      initiallyAvailable ? 'cached match' : 'cached miss',
+      async (t) => {
+        clearMinnanoAvCache();
+        t.after(clearMinnanoAvCache);
+        let revision = 1;
+        const fetchedUrls: string[] = [];
+        t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL) => {
+          const url = String(input);
+          fetchedUrls.push(url);
+          if (url.includes('actress_list.php')) {
+            return new Response(
+              initiallyAvailable || revision === 2
+                ? `<h2 class="ttl"><a href="actress123.html">Demo Star</a></h2>
+                 <p class="furi">でも / Demo Star</p>`
+                : '',
+            );
+          }
+          assert.equal(url, 'https://www.minnano-av.com/actress123.html');
+          return new Response(`
+          <h1>Demo Star</h1>
+          <table class="rate-table">
+            <tr><td class="t9">総合評価</td><td class="t9">${revision === 1 ? 8 : 9}</td></tr>
+          </table>
+          <div class="tagarea"><a>${revision === 1 ? '48kg' : '美人'}</a></div>
+          <span>AV出演期間</span><p>${revision === 1 ? 2023 : 2024}年 -</p>
+        `);
+        });
+        const profile = { name: 'Demo Star', aliases: [] };
+        const firstRun = createMinnanoAvEnricher({ refreshCache: true });
+        const initial = await firstRun.lookup(profile);
+        assert.equal(
+          initial.kind,
+          initiallyAvailable ? 'matched' : 'not-found',
+        );
+        if (initial.kind === 'matched') {
+          assert.equal(initial.profile.ratings?.overall, 8);
+          assert.deepEqual(initial.profile.tags, ['48kg']);
+          assert.equal(initial.profile.debutYear, 2023);
+        }
+        const initialRequests = fetchedUrls.length;
+        revision = 2;
+        assert.deepEqual(await firstRun.lookup(profile), initial);
+        assert.equal(fetchedUrls.length, initialRequests);
+
+        const nextRun = createMinnanoAvEnricher({ refreshCache: true });
+        assert.equal(getMinnanoAvCacheStats().cachedPages, 0);
+        assert.equal(getMinnanoAvCacheStats().cachedProfiles, 0);
+        assert.equal(getMinnanoAvCacheStats().resolvedLookups, 0);
+        const refreshed = await nextRun.lookup(profile);
+        assert.equal(refreshed.kind, 'matched');
+        if (refreshed.kind !== 'matched') return;
+        assert.equal(refreshed.profile.ratings?.overall, 9);
+        assert.deepEqual(refreshed.profile.tags, ['美人']);
+        assert.equal(refreshed.profile.debutYear, 2024);
+        assert.ok(fetchedUrls.length > initialRequests);
+        const refreshedRequests = fetchedUrls.length;
+        assert.deepEqual(await nextRun.lookup(profile), refreshed);
+        assert.equal(fetchedUrls.length, refreshedRequests);
+      },
+    );
+  }
+});
+
 test('snapshot schema requires a same-tier food alias and an image path', () => {
   const snapshot = {
     schemaVersion: SNAPSHOT_SCHEMA_VERSION,

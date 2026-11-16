@@ -1,20 +1,25 @@
 import {
   mkdir,
+  mkdtemp,
   readFile,
   rename,
   rm,
-  stat,
   writeFile,
-  open,
 } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import {
   SNAPSHOT_SCHEMA_VERSION,
+  validateCurrent,
   validateSnapshot,
   type ActressSnapshot,
   type CurrentSnapshot,
   type RefreshStatus,
 } from '@/lib/actresses';
+import {
+  acquireRefreshLock,
+  retryPendingRefreshLockRelease,
+} from './refresh-lock';
 
 const publicRoot = join(process.cwd(), 'public', 'actress-cache');
 const snapshotsRoot = join(publicRoot, 'snapshots');
@@ -28,6 +33,33 @@ export async function ensureRoots() {
     mkdir(workRoot, { recursive: true }),
   ]);
 }
+async function writePublicJson(name: string, body: unknown) {
+  // Temp files must share the destination filesystem, not the private cache's.
+  const temp = join(publicRoot, `.${name}-${randomUUID()}.tmp`);
+  try {
+    await writeFile(temp, JSON.stringify(body), {
+      encoding: 'utf8',
+      flag: 'wx',
+    });
+    await rename(temp, join(publicRoot, name));
+  } finally {
+    await rm(temp, { force: true });
+  }
+}
+
+function validManifest(input: unknown) {
+  const current = validateCurrent(input);
+  if (!current || !/^[a-z0-9-]{1,80}$/i.test(current.snapshotId)) return null;
+  const timestamp = Date.parse(current.createdAt);
+  return Number.isFinite(timestamp) &&
+    new Date(timestamp).toISOString() === current.createdAt &&
+    timestamp <= Date.now() + 5 * 60 * 1000 &&
+    current.snapshotPath ===
+      `/actress-cache/snapshots/${current.snapshotId}/snapshot.json`
+    ? current
+    : null;
+}
+
 export async function writeStatus(
   status: Omit<RefreshStatus, 'schemaVersion' | 'updatedAt'>,
 ) {
@@ -37,19 +69,13 @@ export async function writeStatus(
     updatedAt: new Date().toISOString(),
     ...status,
   };
-  const tmp = join(workRoot, `status-${process.pid}.tmp`);
-  await writeFile(tmp, JSON.stringify(body), 'utf8');
-  await rename(tmp, join(publicRoot, 'status.json'));
+  await writePublicJson('status.json', body);
 }
 export async function currentSnapshot(): Promise<CurrentSnapshot | null> {
   try {
-    const raw = JSON.parse(
-      await readFile(join(publicRoot, 'current.json'), 'utf8'),
-    ) as CurrentSnapshot;
-    return raw.schemaVersion === SNAPSHOT_SCHEMA_VERSION &&
-      typeof raw.snapshotPath === 'string'
-      ? raw
-      : null;
+    return validManifest(
+      JSON.parse(await readFile(join(publicRoot, 'current.json'), 'utf8')),
+    );
   } catch {
     return null;
   }
@@ -61,50 +87,44 @@ export async function isDue() {
     Date.now() - Date.parse(current.createdAt) >= 7 * 24 * 60 * 60 * 1000
   );
 }
+export async function retryPendingLockRelease() {
+  await retryPendingRefreshLockRelease(lockPath);
+}
+
 export async function takeLock() {
   await ensureRoots();
-  try {
-    const file = await open(lockPath, 'wx');
-    await file.writeFile(
-      JSON.stringify({ pid: process.pid, startedAt: Date.now() }),
-    );
-    return async () => {
-      await file.close();
-      await rm(lockPath, { force: true });
-    };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    try {
-      if (Date.now() - (await stat(lockPath)).mtimeMs > 60 * 60 * 1000) {
-        await rm(lockPath, { force: true });
-        return takeLock();
-      }
-    } catch {}
-    return null;
-  }
+  return acquireRefreshLock(lockPath);
 }
 export async function makeStaging(snapshotId: string) {
-  const directory = join(workRoot, `staging-${snapshotId}`);
-  await rm(directory, { recursive: true, force: true });
-  await mkdir(join(directory, 'images'), { recursive: true });
-  return directory;
+  if (!/^[a-z0-9-]{1,80}$/i.test(snapshotId))
+    throw new Error('Invalid snapshot ID');
+  await ensureRoots();
+  const directory = await mkdtemp(
+    join(snapshotsRoot, `.staging-${snapshotId}-`),
+  );
+  try {
+    await mkdir(join(directory, 'images'));
+    return directory;
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    throw error;
+  }
 }
 export async function publishSnapshot(
   snapshot: ActressSnapshot,
   staging: string,
 ) {
   if (!validateSnapshot(snapshot)) throw new Error('Refusing invalid snapshot');
-  const finalDirectory = join(snapshotsRoot, snapshot.snapshotId);
-  await rm(finalDirectory, { recursive: true, force: true });
-  await rename(staging, finalDirectory);
   const manifest: CurrentSnapshot = {
     schemaVersion: SNAPSHOT_SCHEMA_VERSION,
     snapshotId: snapshot.snapshotId,
     snapshotPath: `/actress-cache/snapshots/${snapshot.snapshotId}/snapshot.json`,
     createdAt: snapshot.createdAt,
   };
-  const temp = join(workRoot, `current-${process.pid}.tmp`);
-  await writeFile(temp, JSON.stringify(manifest), 'utf8');
-  await rename(temp, join(publicRoot, 'current.json'));
+  if (!validManifest(manifest)) throw new Error('Refusing invalid manifest');
+  const finalDirectory = join(snapshotsRoot, snapshot.snapshotId);
+  // Published snapshots are immutable; never delete an existing generation.
+  await rename(staging, finalDirectory);
+  await writePublicJson('current.json', manifest);
   await writeStatus({ state: 'idle', message: 'Ready' });
 }
