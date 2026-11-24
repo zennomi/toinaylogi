@@ -3,7 +3,8 @@ import { constants } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
 import { extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
-const prefix = '/actress-cache/';
+const cachePath = '/actress-cache';
+const prefix = `${cachePath}/`;
 const allowedPath =
   /^(?:current\.json|status\.json|snapshots\/[a-z0-9-]{1,80}\/(?:snapshot\.json|images\/[a-z0-9-]{1,100}\.(?:jpg|jpeg|png|webp)))$/i;
 const maxBytes = 8 * 1024 * 1024;
@@ -24,129 +25,128 @@ function sendError(response, code, message) {
   response.end(message);
 }
 
-// Serve only the existing public cache URLs. Never expose locks, staging,
-// arbitrary public files, symlink targets outside this root, or directory lists.
+// Include the paths Next's URL parser and repeated-slash normalization can
+// route to. Delegate only when none of those paths target the cache.
+function routingPaths(rawPath) {
+  const paths = new Set([rawPath]);
+  for (const value of [rawPath, decodeURIComponent(rawPath)]) {
+    paths.add(value);
+    const url = new URL(value.startsWith('/') ? `http://local${value}` : value);
+    paths.add(url.pathname);
+    const collapsed = (value.startsWith('/') ? value : url.pathname).replace(
+      /[\\/]+/g,
+      '/',
+    );
+    paths.add(new URL(`http://local${collapsed}`).pathname);
+  }
+  return paths;
+}
+
+function sendFile(request, response, path, body) {
+  const etag = `"${createHash('sha256').update(body).digest('hex')}"`;
+  const mutableManifest = path === 'current.json' || path === 'status.json';
+  response.setHeader(
+    'Cache-Control',
+    mutableManifest ? 'no-store' : 'no-cache',
+  );
+  response.setHeader('Content-Type', contentTypes[extname(path).toLowerCase()]);
+  response.setHeader('X-Content-Type-Options', 'nosniff');
+  response.setHeader('ETag', etag);
+  const candidates = String(request.headers['if-none-match'] ?? '').split(',');
+  if (
+    !mutableManifest &&
+    candidates.some((candidate) => {
+      const value = candidate.trim().replace(/^W\//, '');
+      return value === '*' || value === etag;
+    })
+  ) {
+    response.writeHead(304);
+    response.end();
+    return;
+  }
+  response.setHeader('Content-Length', body.length);
+  response.writeHead(200);
+  response.end(request.method === 'HEAD' ? undefined : body);
+}
+
+async function serveFile(root, path, request, response) {
+  let file;
+  try {
+    const canonicalRoot = await realpath(root);
+    const canonicalFile = await realpath(join(canonicalRoot, path));
+    const within = relative(canonicalRoot, canonicalFile);
+    if (
+      isAbsolute(within) ||
+      within === '..' ||
+      within.startsWith(`..${sep}`)
+    ) {
+      return sendError(response, 404, 'Not found');
+    }
+    file = await open(
+      canonicalFile,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+    const stat = await file.stat();
+    if (!stat.isFile() || stat.size > maxBytes) {
+      return sendError(response, 404, 'Not found');
+    }
+    // A bounded read also handles an in-place edit growing the file after stat.
+    const buffer = Buffer.alloc(stat.size + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await file.read(
+        buffer,
+        length,
+        buffer.length - length,
+        length,
+      );
+      if (!bytesRead) break;
+      length += bytesRead;
+    }
+    if (length > stat.size)
+      return sendError(response, 503, 'Cache file changed; retry');
+    sendFile(request, response, path, buffer.subarray(0, length));
+  } catch (error) {
+    if (['ENOENT', 'ENOTDIR', 'ELOOP'].includes(error?.code)) {
+      sendError(response, 404, 'Not found');
+    } else {
+      console.error('[actress-cache] Read failed:', error);
+      sendError(response, 500, 'Cache unavailable');
+    }
+  } finally {
+    await file?.close().catch((error) => {
+      console.error('[actress-cache] Close failed:', error);
+    });
+  }
+}
+
 export function createActressCacheHandler(directory) {
   const root = resolve(directory);
   return async function serveActressCache(request, response) {
     const rawPath = (request.url ?? '').split('?')[0];
-    const routingPaths = new Set([rawPath]);
+    let paths;
     try {
-      // Match Next's WHATWG URL parsing and repeated-slash normalization before
-      // delegating. Otherwise /other/../actress-cache/private bypasses this gate.
-      for (const value of [rawPath, decodeURIComponent(rawPath)]) {
-        routingPaths.add(value);
-        const url = new URL(
-          value.startsWith('/') ? `http://local${value}` : value,
-        );
-        routingPaths.add(url.pathname);
-        const collapsed = value.startsWith('/')
-          ? value.replace(/[\\/]+/g, '/')
-          : url.pathname.replace(/[\\/]+/g, '/');
-        routingPaths.add(new URL(`http://local${collapsed}`).pathname);
-      }
+      paths = routingPaths(rawPath);
     } catch {
       sendError(response, 400, 'Invalid URL');
       return true;
     }
-    const isCachePath = (path) =>
-      path.startsWith(prefix) || path === '/actress-cache';
-    if (![...routingPaths].some(isCachePath)) return false;
+    if (
+      ![...paths].some((path) => path.startsWith(prefix) || path === cachePath)
+    )
+      return false;
     const path = rawPath.slice(prefix.length);
     if (
       !rawPath.startsWith(prefix) ||
-      [...routingPaths].some((candidate) => candidate !== rawPath) ||
+      paths.size !== 1 ||
       !allowedPath.test(path)
     ) {
       sendError(response, 404, 'Not found');
-      return true;
-    }
-    if (request.method !== 'GET' && request.method !== 'HEAD') {
+    } else if (request.method !== 'GET' && request.method !== 'HEAD') {
       response.setHeader('Allow', 'GET, HEAD');
       sendError(response, 405, 'Method not allowed');
-      return true;
-    }
-
-    let file;
-    try {
-      const canonicalRoot = await realpath(root);
-      const canonicalFile = await realpath(join(canonicalRoot, path));
-      const within = relative(canonicalRoot, canonicalFile);
-      if (
-        isAbsolute(within) ||
-        within === '..' ||
-        within.startsWith(`..${sep}`)
-      ) {
-        sendError(response, 404, 'Not found');
-        return true;
-      }
-      file = await open(
-        canonicalFile,
-        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-      );
-      const stat = await file.stat();
-      if (!stat.isFile() || stat.size > maxBytes) {
-        sendError(response, 404, 'Not found');
-        return true;
-      }
-      // A bounded read also handles an in-place edit growing the file after stat.
-      const buffer = Buffer.alloc(stat.size + 1);
-      let length = 0;
-      while (length < buffer.length) {
-        const { bytesRead } = await file.read(
-          buffer,
-          length,
-          buffer.length - length,
-          length,
-        );
-        if (!bytesRead) break;
-        length += bytesRead;
-      }
-      if (length > stat.size) {
-        sendError(response, 503, 'Cache file changed; retry');
-        return true;
-      }
-      const body = buffer.subarray(0, length);
-      const etag = `"${createHash('sha256').update(body).digest('hex')}"`;
-      const mutableManifest = path === 'current.json' || path === 'status.json';
-      response.setHeader(
-        'Cache-Control',
-        mutableManifest ? 'no-store' : 'no-cache',
-      );
-      response.setHeader(
-        'Content-Type',
-        contentTypes[extname(path).toLowerCase()],
-      );
-      response.setHeader('X-Content-Type-Options', 'nosniff');
-      response.setHeader('ETag', etag);
-      const candidates = String(request.headers['if-none-match'] ?? '').split(
-        ',',
-      );
-      if (
-        !mutableManifest &&
-        candidates.some((candidate) => {
-          const value = candidate.trim().replace(/^W\//, '');
-          return value === '*' || value === etag;
-        })
-      ) {
-        response.writeHead(304);
-        response.end();
-        return true;
-      }
-      response.setHeader('Content-Length', body.length);
-      response.writeHead(200);
-      response.end(request.method === 'HEAD' ? undefined : body);
-    } catch (error) {
-      if (['ENOENT', 'ENOTDIR', 'ELOOP'].includes(error?.code)) {
-        sendError(response, 404, 'Not found');
-      } else {
-        console.error('[actress-cache] Read failed:', error);
-        sendError(response, 500, 'Cache unavailable');
-      }
-    } finally {
-      await file?.close().catch((error) => {
-        console.error('[actress-cache] Close failed:', error);
-      });
+    } else {
+      await serveFile(root, path, request, response);
     }
     return true;
   };

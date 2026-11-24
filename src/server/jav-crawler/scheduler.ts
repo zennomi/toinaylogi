@@ -1,7 +1,6 @@
 import { refreshActressData } from './crawler';
-import { isDue, retryPendingLockRelease } from './store';
+import { isDue, REFRESH_INTERVAL_MS, retryPendingLockRelease } from './store';
 
-const WEEK = 7 * 24 * 60 * 60 * 1000;
 const RETRY = 15 * 60 * 1000;
 
 export function createActressRefreshScheduler({
@@ -24,7 +23,7 @@ export function createActressRefreshScheduler({
       // pending release even when that new snapshot is not due for another week.
       await recoverRelease();
       if (await checkDue()) {
-        if (await refresh()) delay = WEEK;
+        if (await refresh()) delay = REFRESH_INTERVAL_MS;
       } else {
         delay = 60 * 60 * 1000;
       }

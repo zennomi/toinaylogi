@@ -2,6 +2,7 @@ import { lstat, readFile, readdir } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { refreshActressData } from '../src/server/jav-crawler/crawler';
+import { refreshLockOwnerFile } from '../src/server/jav-crawler/refresh-lock';
 import { paths } from '../src/server/jav-crawler/store';
 
 const startedAt = Date.now();
@@ -16,9 +17,9 @@ async function readDiagnostic(path: string, label: string) {
   try {
     const info = await lstat(path);
     if (info.isDirectory()) {
-      const names = await readdir(path);
-      if (names.length === 1 && /^owner-[a-f0-9-]{36}\.json$/.test(names[0])) {
-        await readDiagnostic(join(path, names[0]), `${label} owner`);
+      const owner = refreshLockOwnerFile(await readdir(path));
+      if (owner) {
+        await readDiagnostic(join(path, owner), `${label} owner`);
       } else {
         log(`${label}: lock directory requires manual inspection`);
       }

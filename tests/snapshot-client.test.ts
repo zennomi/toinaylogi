@@ -81,14 +81,6 @@ function defaultReply(path: string, value = snapshot()): Response {
   return json(value, '"original"');
 }
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
-
 // Drain promise/body-reader work without sleeping or using wall-clock time.
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 class Clock {
@@ -176,7 +168,7 @@ test('loads validated local data with uncached control files and revalidated sna
 });
 
 test('slow body consumption never overlaps polls; the next delay starts at completion', async (t) => {
-  const body = deferred<unknown>();
+  const body = Promise.withResolvers<unknown>();
   const c = client(
     t,
     (path) => {
@@ -203,8 +195,8 @@ test('slow body consumption never overlaps polls; the next delay starts at compl
 
 for (const phase of ['response', 'body'] as const) {
   test(`bounds an initial stalled ${phase}, aborts it and ignores its late completion`, async (t) => {
-    const response = deferred<Response>();
-    const body = deferred<unknown>();
+    const response = Promise.withResolvers<Response>();
+    const body = Promise.withResolvers<unknown>();
     let stall = true;
     const c = client(t, (path) => {
       if (stall && path === manifest().snapshotPath)
@@ -247,8 +239,8 @@ for (const phase of ['response', 'body'] as const) {
 }
 
 test('the timeout includes headers already received, not a fresh body-only deadline', async (t) => {
-  const response = deferred<Response>();
-  const body = deferred<unknown>();
+  const response = Promise.withResolvers<Response>();
+  const body = Promise.withResolvers<unknown>();
   const c = client(t, (path) =>
     path === currentPath ? response.promise : defaultReply(path),
   );
@@ -268,8 +260,8 @@ test('the timeout includes headers already received, not a fresh body-only deadl
 for (const path of [statusPath, currentPath, manifest().snapshotPath]) {
   for (const phase of ['response', 'body'] as const) {
     test(`cleanup aborts ${path} during ${phase}, removes timers and prevents later requests`, async (t) => {
-      const response = deferred<Response>();
-      const body = deferred<unknown>();
+      const response = Promise.withResolvers<Response>();
+      const body = Promise.withResolvers<unknown>();
       const c = client(t, (requested) => {
         if (requested !== path) return defaultReply(requested);
         return phase === 'response'

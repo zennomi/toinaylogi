@@ -88,26 +88,25 @@ test('crashed process is recovered safely by competing reclaimers', async (t) =>
   await winners[0]();
 });
 
-test('delayed old release and empty-directory cleanup cannot delete a successor', async (t) => {
-  const release = await acquireRefreshLock(lock);
-  assert.ok(release);
+function pauseLockRemoval(t: TestContext) {
   const rmdir = fs.rmdir;
-  let enter!: () => void;
-  const entered = new Promise<void>((resolve) => {
-    enter = resolve;
-  });
-  let resume!: () => void;
-  const paused = new Promise<void>((resolve) => {
-    resume = resolve;
-  });
+  const entered = Promise.withResolvers<void>();
+  const paused = Promise.withResolvers<void>();
   t.mock.method(fs, 'rmdir', async (...args: Parameters<typeof fs.rmdir>) => {
     if (args[0] === lock) {
-      enter();
-      await paused;
+      entered.resolve();
+      await paused.promise;
     }
     return rmdir(...args);
   });
   syncBuiltinESMExports();
+  return { entered: entered.promise, resume: paused.resolve };
+}
+
+test('delayed old release and empty-directory cleanup cannot delete a successor', async (t) => {
+  const release = await acquireRefreshLock(lock);
+  assert.ok(release);
+  const { entered, resume } = pauseLockRemoval(t);
   const releasing = release();
   await entered;
   const successor = await acquireRefreshLock(lock);
@@ -123,23 +122,7 @@ test('delayed old release and empty-directory cleanup cannot delete a successor'
 
 test('stale reclaim rmdir cannot delete a newly published owner', async (t) => {
   await crashOwner(t);
-  const rmdir = fs.rmdir;
-  let enter!: () => void;
-  const entered = new Promise<void>((resolve) => {
-    enter = resolve;
-  });
-  let resume!: () => void;
-  const paused = new Promise<void>((resolve) => {
-    resume = resolve;
-  });
-  t.mock.method(fs, 'rmdir', async (...args: Parameters<typeof fs.rmdir>) => {
-    if (args[0] === lock) {
-      enter();
-      await paused;
-    }
-    return rmdir(...args);
-  });
-  syncBuiltinESMExports();
+  const { entered, resume } = pauseLockRemoval(t);
   const reclaiming = acquireRefreshLock(lock);
   await entered;
   const winner = await acquireRefreshLock(lock);

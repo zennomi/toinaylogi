@@ -31,6 +31,14 @@ type Owner = {
   startedAt: number;
 };
 
+const ownerFileName = (token: string) => `owner-${token}.json`;
+
+export function refreshLockOwnerFile(names: string[]): string | null {
+  return names.length === 1 && /^owner-[a-f0-9-]{36}\.json$/.test(names[0])
+    ? names[0]
+    : null;
+}
+
 async function removeOwner(lockPath: string, name: string, identity: Stats) {
   const ownerPath = join(lockPath, name);
   try {
@@ -57,16 +65,16 @@ async function reclaimDeadOwner(lockPath: string) {
     if (!(await lstat(lockPath)).isDirectory()) return false;
     const names = await readdir(lockPath);
     if (!names.length) return true;
-    if (names.length !== 1 || !/^owner-[a-f0-9-]{36}\.json$/.test(names[0]))
-      return false;
-    const ownerPath = join(lockPath, names[0]);
+    const name = refreshLockOwnerFile(names);
+    if (!name) return false;
+    const ownerPath = join(lockPath, name);
     const identity = await lstat(ownerPath);
     if (!identity.isFile() || identity.size > 1024) return false;
     const owner: Owner = JSON.parse(await readFile(ownerPath, 'utf8'));
     if (
       !owner ||
       owner.version !== 1 ||
-      names[0] !== `owner-${owner.token}.json` ||
+      name !== ownerFileName(owner.token) ||
       owner.hostname !== hostname() ||
       !Number.isSafeInteger(owner.pid) ||
       owner.pid < 1 ||
@@ -82,7 +90,7 @@ async function reclaimDeadOwner(lockPath: string) {
       // live. Recovery is only safe for a demonstrably absent local PID.
       if (errorCode(error) !== 'ESRCH') return false;
     }
-    await removeOwner(lockPath, names[0], identity);
+    await removeOwner(lockPath, name, identity);
     return true;
   } catch (error) {
     if (errorCode(error) === 'ENOENT') return true;
@@ -106,7 +114,7 @@ export async function acquireRefreshLock(lockPath: string) {
     hostname: hostname(),
     startedAt: Date.now(),
   };
-  const name = `owner-${owner.token}.json`;
+  const name = ownerFileName(owner.token);
   let published = false;
   try {
     await writeFile(join(candidate, name), JSON.stringify(owner), {

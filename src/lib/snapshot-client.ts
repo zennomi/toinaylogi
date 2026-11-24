@@ -1,5 +1,6 @@
 import {
-  SNAPSHOT_SCHEMA_VERSION,
+  ACTRESS_CACHE_ROOT,
+  validateStatus,
   validateCurrent,
   validateSnapshot,
   type ActressSnapshot,
@@ -7,7 +8,8 @@ import {
   type RefreshStatus,
 } from './actresses';
 
-const root = '/actress-cache';
+const currentPath = `${ACTRESS_CACHE_ROOT}/current.json`;
+const statusPath = `${ACTRESS_CACHE_ROOT}/status.json`;
 
 export type SnapshotClientState = {
   snapshot: ActressSnapshot | null;
@@ -44,30 +46,6 @@ type CachedSnapshot = {
   etag: string | null;
   fingerprint: string;
 };
-
-function validateStatus(value: unknown): RefreshStatus | null {
-  if (!value || typeof value !== 'object') return null;
-  const status = value as Record<string, unknown>;
-  return (status.schemaVersion === SNAPSHOT_SCHEMA_VERSION ||
-    status.schemaVersion === 3) &&
-    (status.state === 'idle' ||
-      status.state === 'refreshing' ||
-      status.state === 'error') &&
-    typeof status.updatedAt === 'string'
-    ? {
-        schemaVersion: SNAPSHOT_SCHEMA_VERSION,
-        state: status.state,
-        updatedAt: status.updatedAt,
-        message:
-          typeof status.message === 'string'
-            ? status.message.slice(0, 280)
-            : undefined,
-        attempt: Number.isSafeInteger(status.attempt)
-          ? Number(status.attempt)
-          : undefined,
-      }
-    : null;
-}
 
 const diagnostic = (error: unknown) =>
   (error instanceof Error ? error.message : 'Request failed').slice(0, 400);
@@ -136,16 +114,10 @@ export function startSnapshotPolling({
   }
 
   async function loadSnapshot() {
-    const { body } = await fetchJson(`${root}/current.json`);
+    const { body } = await fetchJson(currentPath);
     if (stopped) return;
     const current = validateCurrent(body);
-    if (
-      !current ||
-      !Number.isFinite(Date.parse(current.createdAt)) ||
-      current.snapshotPath !==
-        `${root}/snapshots/${current.snapshotId}/snapshot.json`
-    )
-      throw new Error(`${root}/current.json: Invalid manifest`);
+    if (!current) throw new Error(`${currentPath}: Invalid manifest`);
 
     const matchesCache =
       cached &&
@@ -186,9 +158,9 @@ export function startSnapshotPolling({
     let statusError = '';
     let deliveryError = '';
     try {
-      const { body } = await fetchJson(`${root}/status.json`);
+      const { body } = await fetchJson(statusPath);
       status = validateStatus(body);
-      if (!status) throw new Error(`${root}/status.json: Invalid status`);
+      if (!status) throw new Error(`${statusPath}: Invalid status`);
       if (status.state === 'error')
         statusError = status.message || 'Local refresh failed';
     } catch (error) {

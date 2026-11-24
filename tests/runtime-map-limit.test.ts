@@ -3,16 +3,6 @@ import test from 'node:test';
 import { setImmediate } from 'node:timers/promises';
 import { mapLimit } from '../src/server/jav-crawler/fetch';
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((yes, no) => {
-    resolve = yes;
-    reject = no;
-  });
-  return { promise, resolve, reject };
-}
-
 test('mapLimit preserves order and enforces bounded concurrency', async () => {
   let active = 0;
   let peak = 0;
@@ -29,8 +19,8 @@ test('mapLimit preserves order and enforces bounded concurrency', async () => {
 });
 
 test('mapLimit stops assigning on failure and drains even later rejecting workers', async () => {
-  const first = deferred<number>();
-  const second = deferred<number>();
+  const first = Promise.withResolvers<number>();
+  const second = Promise.withResolvers<number>();
   const started: number[] = [];
   const firstError = new Error('first failure');
   let settled = false;

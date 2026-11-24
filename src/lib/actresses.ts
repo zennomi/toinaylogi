@@ -336,7 +336,7 @@ export function validateSnapshot(input: unknown): ActressSnapshot | null {
   const snapshot = input as Record<string, unknown>;
   const isLegacy = snapshot.schemaVersion === LEGACY_SNAPSHOT_SCHEMA_VERSION;
   if (
-    (!isLegacy && snapshot.schemaVersion !== SNAPSHOT_SCHEMA_VERSION) ||
+    !isSnapshotVersion(snapshot.schemaVersion) ||
     !safeText(snapshot.snapshotId, 80) ||
     !safeText(snapshot.createdAt, 40) ||
     !snapshot.source ||
@@ -532,30 +532,61 @@ export function validateSnapshot(input: unknown): ActressSnapshot | null {
   };
 }
 
+export const ACTRESS_CACHE_ROOT = '/actress-cache';
+export const isValidSnapshotId = (id: string) => /^[a-z0-9-]{1,80}$/i.test(id);
+export const snapshotPathFor = (id: string) =>
+  `${ACTRESS_CACHE_ROOT}/snapshots/${id}/snapshot.json`;
+
+function isSnapshotVersion(
+  value: unknown,
+): value is CurrentSnapshot['schemaVersion'] {
+  return (
+    value === SNAPSHOT_SCHEMA_VERSION ||
+    value === LEGACY_SNAPSHOT_SCHEMA_VERSION
+  );
+}
+
+export function validateStatus(input: unknown): RefreshStatus | null {
+  if (!input || typeof input !== 'object') return null;
+  const status = input as Record<string, unknown>;
+  if (
+    !isSnapshotVersion(status.schemaVersion) ||
+    (status.state !== 'idle' &&
+      status.state !== 'refreshing' &&
+      status.state !== 'error') ||
+    typeof status.updatedAt !== 'string'
+  )
+    return null;
+  return {
+    schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+    state: status.state,
+    updatedAt: status.updatedAt,
+    message:
+      typeof status.message === 'string'
+        ? status.message.slice(0, 280)
+        : undefined,
+    attempt: Number.isSafeInteger(status.attempt)
+      ? Number(status.attempt)
+      : undefined,
+  };
+}
+
 export function validateCurrent(input: unknown): CurrentSnapshot | null {
   if (!input || typeof input !== 'object') return null;
   const value = input as Record<string, unknown>;
   const snapshotId = safeText(value.snapshotId, 80);
-  const snapshotPath =
-    typeof value.snapshotPath === 'string' &&
-    /^\/actress-cache\/snapshots\/[a-z0-9-]+\/snapshot\.json$/i.test(
-      value.snapshotPath,
-    )
-      ? value.snapshotPath
-      : null;
-  const schemaVersion = value.schemaVersion;
-  return (schemaVersion === SNAPSHOT_SCHEMA_VERSION ||
-    schemaVersion === LEGACY_SNAPSHOT_SCHEMA_VERSION) &&
-    snapshotId &&
-    snapshotPath &&
-    safeText(value.createdAt, 40)
-    ? {
-        schemaVersion,
-        snapshotId,
-        snapshotPath,
-        createdAt: value.createdAt as string,
-      }
-    : null;
+  const { schemaVersion, snapshotPath, createdAt } = value;
+  if (
+    !isSnapshotVersion(schemaVersion) ||
+    !snapshotId ||
+    !isValidSnapshotId(snapshotId) ||
+    snapshotPath !== snapshotPathFor(snapshotId) ||
+    typeof createdAt !== 'string' ||
+    !safeText(createdAt, 40) ||
+    !Number.isFinite(Date.parse(createdAt))
+  )
+    return null;
+  return { schemaVersion, snapshotId, snapshotPath, createdAt };
 }
 
 export const tierNames = [

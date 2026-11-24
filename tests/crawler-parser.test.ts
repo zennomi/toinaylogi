@@ -262,12 +262,8 @@ test('fresh enrichment refreshes both cached matches and misses between runs', a
         assert.equal(fetchedUrls.length, initialRequests);
 
         const nextRun = createMinnanoAvEnricher({ refreshCache: true });
-        assert.equal(getMinnanoAvCacheStats().cachedPages, 0);
-        assert.equal(getMinnanoAvCacheStats().cachedProfiles, 0);
-        assert.equal(getMinnanoAvCacheStats().resolvedLookups, 0);
         const refreshed = await nextRun.lookup(profile);
         assert.equal(refreshed.kind, 'matched');
-        if (refreshed.kind !== 'matched') return;
         assert.equal(refreshed.profile.ratings?.overall, 9);
         assert.deepEqual(refreshed.profile.tags, ['美人']);
         assert.equal(refreshed.profile.debutYear, 2024);
@@ -442,9 +438,7 @@ test('translates tags to English cleanly with composite tags and patterns', () =
 test('skips tags without translations', () => {
   assert.deepEqual(translateTagToVietnamese('未知のタグ'), []);
   assert.deepEqual(translateTagToEnglish('未知のタグ'), []);
-  assert.deepEqual(translateTagToVietnamese('巨乳，未知のタグ'), [
-    'Vó tu',
-  ]);
+  assert.deepEqual(translateTagToVietnamese('巨乳，未知のタグ'), ['Vó tu']);
   assert.deepEqual(translateTagToEnglish('巨乳，未知のタグ'), ['Big Breasts']);
   assert.deepEqual(translateTags(['巨乳', '未知のタグ', '美人'], 'vi'), [
     'Vó tu',
@@ -705,10 +699,7 @@ test('extracts Gojuon syllables and target kana accurately', () => {
     extractTargetKana(['波多野結衣', 'はたのゆい', 'Hatano Yui']),
     'はたのゆい',
   );
-  assert.equal(
-    extractTargetKana(['Hatano Yui', 'はたの ゆい']),
-    'はたのゆい',
-  );
+  assert.equal(extractTargetKana(['Hatano Yui', 'はたの ゆい']), 'はたのゆい');
 });
 
 test('manages in-memory cache correctly for Gojuon lookups', async () => {

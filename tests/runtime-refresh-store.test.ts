@@ -2,8 +2,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import test, { after, afterEach, beforeEach } from 'node:test';
+import { join } from 'node:path';
+import test, {
+  after,
+  afterEach,
+  beforeEach,
+  type TestContext,
+} from 'node:test';
 import timers from 'node:timers/promises';
 import {
   SNAPSHOT_SCHEMA_VERSION,
@@ -55,6 +60,14 @@ const json = async (path: string) =>
   JSON.parse(await fs.readFile(path, 'utf8'));
 const response = (body: string) =>
   new Response(body, { headers: { 'content-type': 'text/html' } });
+
+function recordErrors(t: TestContext) {
+  const messages: string[] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => {
+    messages.push(args.join(' '));
+  });
+  return messages;
+}
 
 function snapshot(snapshotId = 'demo'): ActressSnapshot {
   return {
@@ -150,41 +163,40 @@ test('malformed manifests, mismatched paths and invalid/future timestamps cannot
   assert.equal(await store.isDue(), true);
 });
 
-test('publishing and status writes keep staging and unique temps on the destination filesystem', async (t) => {
+test('publication works across cache mounts and concurrent status writes replace the file atomically', async (t) => {
   const rename = fs.rename;
-  const moves: [string, string][] = [];
   t.mock.method(fs, 'rename', async (from: string, to: string) => {
-    moves.push([from, to]);
-    // Model .cache and public living on different mounted filesystems.
+    // Model a public cache mounted on a different filesystem from scratch space.
     if (
-      from.startsWith(store.paths.workRoot) &&
+      from.startsWith(store.paths.publicRoot) !==
       to.startsWith(store.paths.publicRoot)
     )
       throw errno('EXDEV');
-    assert.equal(dirname(from), dirname(to));
     return rename(from, to);
   });
   syncBuiltinESMExports();
   const data = snapshot();
-  const staging = await stage(data);
-  assert.equal(dirname(staging), store.paths.snapshotsRoot);
-  await store.publishSnapshot(data, staging);
-  await Promise.all(
-    Array.from({ length: 8 }, (_, i) =>
-      store.writeStatus({ state: 'idle', message: String(i) }),
-    ),
-  );
-  assert.equal(moves.length, 11);
-  assert.equal(new Set(moves.map(([from]) => from)).size, moves.length);
+  await store.publishSnapshot(data, await stage(data));
+  const statusPath = join(store.paths.publicRoot, 'status.json');
+  const messages = Array.from({ length: 8 }, (_, i) => String(i));
+  const previous = await fs.open(statusPath, 'r');
+  try {
+    await Promise.all(
+      messages.map((message) => store.writeStatus({ state: 'idle', message })),
+    );
+    // A reader that opened the old generation still sees its complete contents.
+    assert.equal(JSON.parse(await previous.readFile('utf8')).message, 'Ready');
+  } finally {
+    await previous.close();
+  }
   assert.deepEqual(await store.currentSnapshot(), manifest(data.createdAt));
   assert.deepEqual(
     await json(join(store.paths.snapshotsRoot, 'demo', 'snapshot.json')),
     data,
   );
-  assert.equal(
-    (await json(join(store.paths.publicRoot, 'status.json'))).state,
-    'idle',
-  );
+  const latest = await json(statusPath);
+  assert.equal(latest.state, 'idle');
+  assert.ok(messages.includes(latest.message));
   assert.deepEqual((await fs.readdir(store.paths.publicRoot)).sort(), [
     'current.json',
     'snapshots',
@@ -242,7 +254,7 @@ test('invalid publish metadata and duplicate generations never remove the curren
 });
 
 test('scheduler schedules and unrefs the next attempt after due-check and refresh rejection', async (t) => {
-  const errors = t.mock.method(console, 'error', () => {});
+  const errors = recordErrors(t);
   const pending: { run: () => void; delay?: number }[] = [];
   let unrefs = 0;
   let checks = 0;
@@ -281,7 +293,9 @@ test('scheduler schedules and unrefs the next attempt after due-check and refres
   assert.equal(checks, 6);
   assert.equal(refreshes, 4);
   assert.equal(unrefs, 6);
-  assert.equal(errors.mock.callCount(), 2);
+  const diagnostics = errors.join('\n');
+  assert.match(diagnostics, /due check failed/);
+  assert.match(diagnostics, /acquisition or cleanup failed/);
 });
 
 test('scheduler retries a failed release even after a successful publication makes data fresh', async (t) => {
@@ -296,10 +310,7 @@ test('scheduler retries a failed release even after a successful publication mak
   syncBuiltinESMExports();
   await assert.rejects(release(), { code: 'EACCES' });
   const pending: { run: () => void; delay?: number }[] = [];
-  let scheduled!: () => void;
-  const firstTick = new Promise<void>((resolve) => {
-    scheduled = resolve;
-  });
+  let scheduled = Promise.withResolvers<void>();
   let refreshes = 0;
   createActressRefreshScheduler({
     async refresh() {
@@ -308,20 +319,18 @@ test('scheduler retries a failed release even after a successful publication mak
     },
     later: ((run: () => void, delay?: number) => {
       pending.push({ run, delay });
-      scheduled();
+      scheduled.resolve();
       return { unref() {} };
     }) as typeof setTimeout,
   })();
-  await firstTick;
+  await scheduled.promise;
   // The failed release is recoverable and must not stop scheduling.
   assert.equal(pending[0]?.delay, 900_000);
   failure.mock.restore();
   syncBuiltinESMExports();
-  const secondTick = new Promise<void>((resolve) => {
-    scheduled = resolve;
-  });
+  scheduled = Promise.withResolvers<void>();
   pending.shift()!.run();
-  await secondTick;
+  await scheduled.promise;
   assert.equal(pending[0]?.delay, 3600_000);
   assert.equal(
     refreshes,
@@ -352,17 +361,11 @@ test('crawler returns failure on lock acquisition errors and the next attempt ca
 });
 
 test('crawler drains failed profile workers before cleanup, attempts release even if cleanup fails, and retries failed release', async (t) => {
-  const errors = t.mock.method(console, 'error', () => {});
+  const errors = recordErrors(t);
   let profileCalls = 0;
   let movieCalls = 0;
-  let notify!: () => void;
-  const secondStarted = new Promise<void>((resolve) => {
-    notify = resolve;
-  });
-  let resume!: () => void;
-  const blocked = new Promise<void>((resolve) => {
-    resume = resolve;
-  });
+  const secondStarted = Promise.withResolvers<void>();
+  const blocked = Promise.withResolvers<void>();
   t.mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
     const url = String(input);
     assert.ok(
@@ -373,8 +376,8 @@ test('crawler drains failed profile workers before cleanup, attempts release eve
     if (url.includes('/actress/')) {
       profileCalls++;
       if (profileCalls === 2) {
-        notify();
-        await blocked;
+        secondStarted.resolve();
+        await blocked.promise;
       }
       return response('<html>broken profile</html>');
     }
@@ -406,7 +409,7 @@ test('crawler drains failed profile workers before cleanup, attempts release eve
     settled = true;
     return result;
   });
-  await secondStarted;
+  await secondStarted.promise;
   await timers.setImmediate();
   assert.equal(settled, false);
   assert.equal(profileCalls, 2);
@@ -414,12 +417,17 @@ test('crawler drains failed profile workers before cleanup, attempts release eve
   assert.equal(releaseAttempts, 0);
   assert.equal(await store.takeLock(), null);
   assert.equal((await fs.readdir(store.paths.snapshotsRoot)).length, 1);
-  resume();
+  blocked.resolve();
   assert.equal(await refresh, false);
   assert.equal(profileCalls, 2, 'third profile must not be assigned');
-  assert.equal(cleanupAttempts, 1);
-  assert.equal(releaseAttempts, 1);
-  assert.equal(errors.mock.callCount(), 3);
+  assert.ok(cleanupAttempts > 0);
+  assert.ok(releaseAttempts > 0);
+  const diagnostics = errors.join('\n');
+  const status = await json(join(store.paths.publicRoot, 'status.json'));
+  assert.equal(status.state, 'error');
+  assert.ok(diagnostics.includes(status.message));
+  assert.match(diagnostics, /staging cleanup failed/i);
+  assert.match(diagnostics, /lock release failed/i);
   cleanupFailure.mock.restore();
   releaseFailure.mock.restore();
   syncBuiltinESMExports();

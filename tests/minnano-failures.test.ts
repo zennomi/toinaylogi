@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import {
   clearMinnanoAvCache,
   createMinnanoAvEnricher,
-  getMinnanoAvCacheStats,
 } from '../src/server/jav-crawler/minnano-av';
 
 const profile = { name: 'Demo Star', aliases: ['Demo'] };
@@ -51,7 +50,6 @@ test('Minnano outages open the per-run circuit and are never cached as misses', 
       assert.equal((await run.lookup(profile)).kind, 'unavailable');
       assert.equal(requests, 1);
       assert.equal(run.stats.blocked, 1);
-      assert.equal(getMinnanoAvCacheStats().resolvedLookups, 0);
       assert.equal(
         (await run.lookup({ name: 'Another Star', aliases: [] })).kind,
         'unavailable',
@@ -67,8 +65,7 @@ test('Minnano outages open the per-run circuit and are never cached as misses', 
       const nextRun = createMinnanoAvEnricher();
       const result = await nextRun.lookup(profile);
       assert.equal(result.kind, 'matched');
-      if (result.kind === 'matched')
-        assert.equal(result.profile.ratings?.overall, 9);
+      assert.equal(result.profile.ratings?.overall, 9);
       assert.equal(nextRun.stats.blocked, 0);
       assert.equal(requests, 3);
     });

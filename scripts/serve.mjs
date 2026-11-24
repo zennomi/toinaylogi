@@ -26,10 +26,7 @@ export function parseServerOptions(
   return { port, hostname, help: values.help ?? false };
 }
 
-export async function startServer({
-  port = 3000,
-  hostname = '127.0.0.1',
-} = {}) {
+async function startServer({ port, hostname }) {
   // This entry point serves a production build; development uses next dev.
   process.env.NODE_ENV = 'production';
   const { default: next } = await import('next');

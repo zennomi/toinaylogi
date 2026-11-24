@@ -10,6 +10,8 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import {
   SNAPSHOT_SCHEMA_VERSION,
+  isValidSnapshotId,
+  snapshotPathFor,
   validateCurrent,
   validateSnapshot,
   type ActressSnapshot,
@@ -20,6 +22,8 @@ import {
   acquireRefreshLock,
   retryPendingRefreshLockRelease,
 } from './refresh-lock';
+
+export const REFRESH_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 
 const publicRoot = join(process.cwd(), 'public', 'actress-cache');
 const snapshotsRoot = join(publicRoot, 'snapshots');
@@ -49,13 +53,10 @@ async function writePublicJson(name: string, body: unknown) {
 
 function validManifest(input: unknown) {
   const current = validateCurrent(input);
-  if (!current || !/^[a-z0-9-]{1,80}$/i.test(current.snapshotId)) return null;
+  if (!current) return null;
   const timestamp = Date.parse(current.createdAt);
-  return Number.isFinite(timestamp) &&
-    new Date(timestamp).toISOString() === current.createdAt &&
-    timestamp <= Date.now() + 5 * 60 * 1000 &&
-    current.snapshotPath ===
-      `/actress-cache/snapshots/${current.snapshotId}/snapshot.json`
+  return new Date(timestamp).toISOString() === current.createdAt &&
+    timestamp <= Date.now() + 5 * 60 * 1000
     ? current
     : null;
 }
@@ -84,7 +85,7 @@ export async function isDue() {
   const current = await currentSnapshot();
   return (
     !current ||
-    Date.now() - Date.parse(current.createdAt) >= 7 * 24 * 60 * 60 * 1000
+    Date.now() - Date.parse(current.createdAt) >= REFRESH_INTERVAL_MS
   );
 }
 export async function retryPendingLockRelease() {
@@ -96,8 +97,7 @@ export async function takeLock() {
   return acquireRefreshLock(lockPath);
 }
 export async function makeStaging(snapshotId: string) {
-  if (!/^[a-z0-9-]{1,80}$/i.test(snapshotId))
-    throw new Error('Invalid snapshot ID');
+  if (!isValidSnapshotId(snapshotId)) throw new Error('Invalid snapshot ID');
   await ensureRoots();
   const directory = await mkdtemp(
     join(snapshotsRoot, `.staging-${snapshotId}-`),
@@ -118,7 +118,7 @@ export async function publishSnapshot(
   const manifest: CurrentSnapshot = {
     schemaVersion: SNAPSHOT_SCHEMA_VERSION,
     snapshotId: snapshot.snapshotId,
-    snapshotPath: `/actress-cache/snapshots/${snapshot.snapshotId}/snapshot.json`,
+    snapshotPath: snapshotPathFor(snapshot.snapshotId),
     createdAt: snapshot.createdAt,
   };
   if (!validManifest(manifest)) throw new Error('Refusing invalid manifest');
